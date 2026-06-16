@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import { db } from "./firebase";
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
 
 const FLUO = ["#39FF14","#FF6EC7","#FFD700","#00FFFF","#FF4500","#ADFF2F","#B44FFF"];
 const INDICES_GRAF = [
@@ -12,12 +14,18 @@ const INDICES_GRAF = [
 function calcEdad(fn, egSem) {
   if (!fn || !egSem) return { diasVida: null, egCorr: "-" };
   const diff = Math.floor((new Date() - new Date(fn)) / 86400000);
-  const tot = parseInt(egSem)*7 + diff;
-  return { diasVida: diff, egCorr: `${Math.floor(tot/7)}+${tot%7} sem` };
+  const tot = parseInt(egSem) * 7 + diff;
+  return { diasVida: diff, egCorr: `${Math.floor(tot / 7)}+${tot % 7} sem` };
 }
 
-const emptyReg = { fecha: new Date().toISOString().slice(0,10), pim:"", peep:"", ti:"", fr:"", fio2:"", po2:"", pco2:"", Te:"", MAP:"", PAO2:"", IO:"", IV:"", Aa:"", aA:"" };
+const emptyReg = {
+  fecha: new Date().toISOString().slice(0, 10),
+  pim:"", peep:"", ti:"", fr:"", fio2:"",
+  po2:"", pco2:"",
+  Te:"", MAP:"", PAO2:"", IO:"", IV:"", Aa:"", aA:""
+};
 const emptyPac = { nombre:"", fn:"", egSem:"", color: FLUO[0] };
+const DOC_REF = doc(db, "neonatologia", "pacientes");
 
 export default function App() {
   const [pacs, setPacs] = useState([]);
@@ -32,42 +40,31 @@ export default function App() {
   const [idxSelec, setIdxSelec] = useState(["aA","IO"]);
   const [lastSync, setLastSync] = useState(null);
   const canvasRef = useRef(null);
-  const pollRef = useRef(null);
 
   const pac = pacs.find(p => p.id === sel);
 
-  // ── STORAGE ──
-  async function cargarDatos() {
-    try {
-      const res = await window.storage.get("pacientes", true);
-      if (res && res.value) setPacs(JSON.parse(res.value));
-    } catch(e) { /* primera vez, no hay datos */ }
-    setLoading(false);
-    setLastSync(new Date());
-  }
+  useEffect(() => {
+    const unsub = onSnapshot(DOC_REF, snap => {
+      if (snap.exists()) setPacs(snap.data().lista || []);
+      setLoading(false);
+      setLastSync(new Date());
+    }, () => setLoading(false));
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (tab === "grafico" && pac) setTimeout(() => dibujarGrafico(), 50);
+  }, [tab, sel, pacs, idxSelec]);
 
   async function guardarDatos(nuevos) {
     setSaving(true);
     try {
-      await window.storage.set("pacientes", JSON.stringify(nuevos), true);
+      await setDoc(DOC_REF, { lista: nuevos });
       setLastSync(new Date());
-    } catch(e) { console.error("Error guardando",e); }
+    } catch(e) { console.error("Error guardando:", e); }
     setSaving(false);
   }
 
-  useEffect(() => {
-    cargarDatos();
-    pollRef.current = setInterval(()=>{
-      cargarDatos();
-    }, 30000);
-    return () => clearInterval(pollRef.current);
-  }, []);
-
-  useEffect(() => {
-    if (tab === "grafico" && pac) setTimeout(()=>dibujarGrafico(), 50);
-  }, [tab, sel, pacs, idxSelec]);
-
-  // ── HELPERS ──
   async function updatePacs(fn) {
     const nuevos = fn(pacs);
     setPacs(nuevos);
@@ -82,11 +79,13 @@ export default function App() {
     ctx.clearRect(0,0,W,H);
     ctx.fillStyle = "#0a0a0a";
     ctx.fillRect(0,0,W,H);
-    const regs = [...pac.registros].sort((a,b)=>a.fecha.localeCompare(b.fecha));
-    if (!regs.length) { ctx.fillStyle="#333"; ctx.font="12px monospace"; ctx.fillText("Sin datos",W/2-35,H/2); return; }
+    const regs = [...pac.registros].sort((a,b) => a.fecha.localeCompare(b.fecha));
+    if (!regs.length) {
+      ctx.fillStyle="#333"; ctx.font="12px monospace";
+      ctx.fillText("Sin datos", W/2-35, H/2); return;
+    }
     const pad={t:24,r:12,b:44,l:48};
-    const gW=W-pad.l-pad.r, gH=H-pad.t-pad.b;
-    const n=regs.length;
+    const gW=W-pad.l-pad.r, gH=H-pad.t-pad.b, n=regs.length;
     const xOf=i=>pad.l+(n>1?i*(gW/(n-1)):gW/2);
     ctx.strokeStyle="#1e1e1e"; ctx.lineWidth=1;
     for(let i=0;i<=4;i++){const y=pad.t+gH/4*i;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();}
@@ -98,13 +97,13 @@ export default function App() {
         const sx=xOf(si);
         ctx.save(); ctx.strokeStyle="#FFD700"; ctx.lineWidth=1.5; ctx.setLineDash([4,3]);
         ctx.beginPath(); ctx.moveTo(sx,pad.t); ctx.lineTo(sx,H-pad.b); ctx.stroke();
-        ctx.setLineDash([]); ctx.fillStyle="#FFD700"; ctx.font="9px monospace"; ctx.textAlign="center";
+        ctx.setLineDash([]); ctx.fillStyle="#FFD700"; ctx.font="9px monospace";
         ctx.fillText("SURF",sx,pad.t-6); ctx.restore();
       }
     }
     idxSelec.forEach(key=>{
       const cfg=INDICES_GRAF.find(i=>i.key===key); if(!cfg) return;
-      const vals=regs.map(r=>{ const v=parseFloat(r[key]); return isNaN(v)?null:v; });
+      const vals=regs.map(r=>{const v=parseFloat(r[key]);return isNaN(v)?null:v;});
       const clean=vals.filter(v=>v!==null); if(!clean.length) return;
       const mn=Math.min(...clean),mx=Math.max(...clean),rng=mx-mn||1;
       const yOf=v=>pad.t+gH-((v-mn)/rng)*gH*0.85-gH*0.075;
@@ -114,17 +113,16 @@ export default function App() {
       ctx.stroke();
       ctx.fillStyle=cfg.color;
       vals.forEach((v,i)=>{if(v===null)return;ctx.beginPath();ctx.arc(xOf(i),yOf(v),3,0,Math.PI*2);ctx.fill();});
-      ctx.fillStyle=cfg.color; ctx.font="9px monospace"; ctx.textAlign="center";
+      ctx.font="9px monospace"; ctx.textAlign="center";
       vals.forEach((v,i)=>{if(v===null)return;ctx.fillText(v,xOf(i),yOf(v)-7);});
     });
   }
 
-  // ── ACCIONES ──
   function openNewPac(){setFormPac({...emptyPac,color:FLUO[pacs.length%FLUO.length]});setVista("newPac");}
   function openEditPac(){setFormPac({nombre:pac.nombre,fn:pac.fn,egSem:pac.egSem,color:pac.color});setVista("editPac");}
 
   async function guardarNuevoPac(){
-    if(!formPac.nombre) return;
+    if(!formPac.nombre)return;
     await updatePacs(prev=>[...prev,{...formPac,id:Date.now(),registros:[],surfactante:null}]);
     setVista("mapa");
   }
@@ -152,19 +150,18 @@ export default function App() {
 
   function toggleIdx(key){setIdxSelec(prev=>prev.includes(key)?prev.filter(k=>k!==key):[...prev,key]);}
   const setR=(f,v)=>setFormReg(r=>({...r,[f]:v}));
+  const syncStr=lastSync?`${lastSync.getHours()}:${String(lastSync.getMinutes()).padStart(2,"0")}`:"-";
 
-  const syncStr = lastSync ? `${lastSync.getHours()}:${String(lastSync.getMinutes()).padStart(2,"0")}` : "-";
+  const inp={background:"#111",border:"1px solid #2a2a2a",color:"#fff",padding:"6px 10px",borderRadius:6,width:"100%",fontSize:13,boxSizing:"border-box"};
 
-  // ── LOADING ──
-  if (loading) return (
+  if(loading) return(
     <div style={{background:"#0a0a0a",minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"monospace"}}>
       <div style={{color:"#39FF14",fontSize:22,marginBottom:12}}>🫁</div>
-      <div style={{color:"#39FF14",fontSize:14,letterSpacing:2}}>Cargando...</div>
-      <div style={{color:"#333",fontSize:11,marginTop:8}}>Conectando con servidor compartido</div>
+      <div style={{color:"#39FF14",fontSize:14,letterSpacing:2}}>Conectando...</div>
+      <div style={{color:"#333",fontSize:11,marginTop:8}}>Firebase Firestore</div>
     </div>
   );
 
-  // ── FORM PACIENTE ──
   if(vista==="newPac"||vista==="editPac"){
     const esNuevo=vista==="newPac";
     return(
@@ -175,21 +172,18 @@ export default function App() {
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           <div><div style={{color:"#888",fontSize:11,marginBottom:3}}>Nombre / ID</div>
-            <input value={formPac.nombre||""} onChange={e=>setFormPac(fp=>({...fp,nombre:e.target.value}))}
-              style={{background:"#111",border:"1px solid #333",color:"#fff",padding:"7px 10px",borderRadius:7,width:"100%",fontSize:14,boxSizing:"border-box"}}/></div>
+            <input value={formPac.nombre||""} onChange={e=>setFormPac(fp=>({...fp,nombre:e.target.value}))} style={inp}/></div>
           <div><div style={{color:"#888",fontSize:11,marginBottom:3}}>Fecha de nacimiento</div>
-            <input type="date" value={formPac.fn||""} onChange={e=>setFormPac(fp=>({...fp,fn:e.target.value}))}
-              style={{background:"#111",border:"1px solid #333",color:"#fff",padding:"7px 10px",borderRadius:7,width:"100%",fontSize:14,boxSizing:"border-box"}}/></div>
+            <input type="date" value={formPac.fn||""} onChange={e=>setFormPac(fp=>({...fp,fn:e.target.value}))} style={inp}/></div>
           <div><div style={{color:"#888",fontSize:11,marginBottom:3}}>EG semanas</div>
-            <input type="number" value={formPac.egSem||""} onChange={e=>setFormPac(fp=>({...fp,egSem:e.target.value}))}
-              style={{background:"#111",border:"1px solid #333",color:"#fff",padding:"7px 10px",borderRadius:7,width:"100%",fontSize:14,boxSizing:"border-box"}}/></div>
+            <input type="number" value={formPac.egSem||""} onChange={e=>setFormPac(fp=>({...fp,egSem:e.target.value}))} style={inp}/></div>
           <div><div style={{color:"#888",fontSize:11,marginBottom:6}}>Color</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               {FLUO.map(c=><div key={c} onClick={()=>setFormPac(fp=>({...fp,color:c}))}
                 style={{width:30,height:30,borderRadius:"50%",background:c,cursor:"pointer",border:formPac.color===c?"3px solid #fff":"3px solid #0a0a0a",boxSizing:"border-box"}}/>)}
             </div></div>
           <button onClick={esNuevo?guardarNuevoPac:guardarEditPac} disabled={saving}
-            style={{background:saving?"#333":formPac.color,color:"#000",border:"none",padding:11,borderRadius:8,fontWeight:"bold",fontSize:15,cursor:"pointer",marginTop:6}}>
+            style={{background:saving?"#333":formPac.color,color:"#000",border:"none",padding:11,borderRadius:8,fontWeight:"bold",fontSize:15,cursor:"pointer"}}>
             {saving?"Guardando...":(esNuevo?"Agregar paciente":"Guardar cambios")}
           </button>
           {!esNuevo&&<button onClick={()=>borrarPac(sel)}
@@ -201,28 +195,22 @@ export default function App() {
     );
   }
 
-  // ── MAPA ──
   if(vista==="mapa") return(
     <div style={{background:"#0a0a0a",minHeight:"100vh",padding:14,fontFamily:"monospace"}}>
       <div style={{textAlign:"center",marginBottom:14}}>
         <div style={{color:"#39FF14",fontSize:20,fontWeight:"bold",letterSpacing:2}}>🫁 ÍNDICES VENT.</div>
-        <div style={{color:"#333",fontSize:10}}>Neonatología · compartido · sync {syncStr}</div>
-      </div>
-      <div style={{display:"flex",justifyContent:"flex-end",marginBottom:10}}>
-        <button onClick={cargarDatos} style={{background:"none",border:"1px solid #333",color:"#555",padding:"4px 10px",borderRadius:6,fontSize:11,cursor:"pointer"}}>
-          ↻ Actualizar
-        </button>
+        <div style={{color:"#333",fontSize:10}}>Neonatología · sync {syncStr}</div>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
         {pacs.map(p=>{
-          const {diasVida,egCorr}=calcEdad(p.fn,p.egSem);
+          const{diasVida,egCorr}=calcEdad(p.fn,p.egSem);
           const ult=p.registros[p.registros.length-1];
           return(
             <div key={p.id} onClick={()=>{setSel(p.id);setVista("ficha");setTab("carga");}}
               style={{background:"#111",border:`2px solid ${p.color}`,borderRadius:10,padding:11,cursor:"pointer"}}>
               <div style={{color:p.color,fontWeight:"bold",fontSize:14,marginBottom:1}}>{p.nombre||"—"}</div>
               <div style={{color:"#444",fontSize:10,marginTop:4}}>
-                <div>Días vida: <span style={{color:"#aaa"}}>{diasVida??"-"}</span></div>
+                <div>Días: <span style={{color:"#aaa"}}>{diasVida??"-"}</span></div>
                 <div>EGc: <span style={{color:"#aaa"}}>{egCorr}</span></div>
               </div>
               {ult&&<div style={{marginTop:6,borderTop:"1px solid #222",paddingTop:5,display:"flex",gap:8}}>
@@ -240,12 +228,12 @@ export default function App() {
           <span style={{color:"#333",fontSize:32}}>+</span>
         </div>
       </div>
-      <div style={{color:"#2a2a2a",fontSize:10,textAlign:"center"}}>{pacs.length} paciente{pacs.length!==1?"s":""} · datos compartidos</div>
+      <div style={{color:"#2a2a2a",fontSize:10,textAlign:"center"}}>{pacs.length} paciente{pacs.length!==1?"s":""} · tiempo real</div>
     </div>
   );
 
   if(!pac) return null;
-  const {diasVida,egCorr}=calcEdad(pac.fn,pac.egSem);
+  const{diasVida,egCorr}=calcEdad(pac.fn,pac.egSem);
 
   const numIn=(field,label,color="#666",unit="")=>(
     <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:7}}>
@@ -258,7 +246,6 @@ export default function App() {
 
   return(
     <div style={{background:"#0a0a0a",minHeight:"100vh",padding:12,fontFamily:"monospace"}}>
-      {/* header */}
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
         <button onClick={()=>setVista("mapa")} style={{background:"none",border:"none",color:"#aaa",fontSize:20,cursor:"pointer"}}>←</button>
         <div style={{flex:1}}>
@@ -284,13 +271,11 @@ export default function App() {
         ))}
       </div>
 
-      {/* CARGA */}
       {tab==="carga"&&(
         <div>
           <div style={{marginBottom:10}}>
             <div style={{color:"#555",fontSize:11,marginBottom:3}}>Fecha</div>
-            <input type="date" value={formReg.fecha} onChange={e=>setR("fecha",e.target.value)}
-              style={{background:"#111",border:"1px solid #2a2a2a",color:"#fff",padding:"6px 10px",borderRadius:6,width:"100%",fontSize:13,boxSizing:"border-box"}}/>
+            <input type="date" value={formReg.fecha} onChange={e=>setR("fecha",e.target.value)} style={inp}/>
           </div>
           <div style={{color:pac.color,fontSize:11,fontWeight:"bold",marginBottom:8,letterSpacing:1}}>— ARM —</div>
           {numIn("pim","PIM",pac.color,"cmH₂O")}
@@ -320,7 +305,6 @@ export default function App() {
         </div>
       )}
 
-      {/* GRÁFICO */}
       {tab==="grafico"&&(
         <div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
@@ -350,7 +334,7 @@ export default function App() {
               </thead>
               <tbody>
                 {[...pac.registros].sort((a,b)=>a.fecha.localeCompare(b.fecha)).map(r=>{
-                  const aAv=parseFloat(r.aA), IOv=parseFloat(r.IO);
+                  const aAv=parseFloat(r.aA),IOv=parseFloat(r.IO);
                   const cAA=aAv<0.1?"#FF4500":aAv<0.22?"#FF6EC7":aAv<0.7?"#FFD700":"#39FF14";
                   const cIO=IOv>40?"#FF4500":IOv>25?"#FF6EC7":IOv>10?"#FFD700":"#39FF14";
                   const esSurf=pac.surfactante?.fecha===r.fecha;
@@ -374,7 +358,6 @@ export default function App() {
         </div>
       )}
 
-      {/* SURFACTANTE */}
       {tab==="surf"&&(
         <div>
           {pac.surfactante?.fecha&&(
@@ -393,13 +376,12 @@ export default function App() {
           <div style={{color:"#FF6EC7",fontSize:11,fontWeight:"bold",marginBottom:10,letterSpacing:1}}>— REGISTRAR SURFACTANTE —</div>
           <div style={{marginBottom:8}}>
             <div style={{color:"#666",fontSize:11,marginBottom:3}}>Fecha de indicación</div>
-            <input type="date" value={formSurf.fecha} onChange={e=>setFormSurf(f=>({...f,fecha:e.target.value}))}
-              style={{background:"#111",border:"1px solid #2a2a2a",color:"#fff",padding:"6px 10px",borderRadius:6,width:"100%",fontSize:13,boxSizing:"border-box"}}/>
+            <input type="date" value={formSurf.fecha} onChange={e=>setFormSurf(f=>({...f,fecha:e.target.value}))} style={inp}/>
           </div>
           <div style={{marginBottom:14}}>
             <div style={{color:"#666",fontSize:11,marginBottom:3}}>Índice disparador</div>
             <select value={formSurf.indiceDis} onChange={e=>setFormSurf(f=>({...f,indiceDis:e.target.value}))}
-              style={{background:"#111",border:"1px solid #2a2a2a",color:"#fff",padding:"6px 10px",borderRadius:6,width:"100%",fontSize:13}}>
+              style={{...inp,padding:"6px 10px"}}>
               <option value="">Seleccionar...</option>
               <option>IO</option><option>a/A</option><option>A-a</option><option>IV</option><option>MAP</option>
             </select>
